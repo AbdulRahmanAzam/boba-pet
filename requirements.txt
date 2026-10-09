@@ -1,0 +1,7 @@
+# Same as the dependencies in pyproject.toml, for running from a clone.
+numpy>=1.26
+sounddevice>=0.4
+vosk>=0.3.45
+faster-whisper>=1.0
+model2vec>=0.3
+tkinterdnd2>=0.4

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Compile every module
+        run: uv run --no-project python -m py_compile (Get-ChildItem *.py).FullName
+      - name: Build the package
+        run: uv build
+      - name: Install and import
+        run: |
+          uv venv .ci
+          uv pip install --python .ci\Scripts\python.exe (Get-ChildItem dist\*.whl).FullName
+          .ci\Scripts\python.exe -c "import sys, boba_pet.launch as L; sys.path.insert(0, str(L.HERE)); import claude_pet, pet_setup; print('ok')"
+      - name: Check for secrets
+        run: |
+          if (git ls-files | Select-String -Pattern '(^|/)\.env$') { throw ".env must not be committed" }

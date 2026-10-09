@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boba-pet"
+version = "1.0.0"
+description = "Boba: an always-on-top desktop pet for Claude Code, Codex, Gemini and Groq on Windows."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Abdul Rahman Azam" }]
+keywords = ["claude", "claude-code", "desktop-pet", "ai-assistant", "tkinter", "windows"]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Environment :: Win32 (MS Windows)",
+    "Topic :: Desktop Environment",
+]
+dependencies = [
+    "numpy>=1.26",
+    "sounddevice>=0.4",
+    "vosk>=0.3.45",
+    "faster-whisper>=1.0",
+    "model2vec>=0.3",
+    "tkinterdnd2>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/AbdulRahmanAzam/boba-pet"
+Issues = "https://github.com/AbdulRahmanAzam/boba-pet/issues"
+
+[project.gui-scripts]
+boba-pet = "boba_pet.launch:main"
+
+[project.scripts]
+boba-pet-setup = "boba_pet.launch:setup"
+
+# The code lives at the repo root (so `python claude_pet.py` keeps working
+# from a clone) and installs as the boba_pet package.
+[tool.setuptools]
+package-dir = { "boba_pet" = "." }
+packages = ["boba_pet"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+boba_pet = ["speak.ps1", "vscode-ext/*"]

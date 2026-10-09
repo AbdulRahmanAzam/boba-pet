@@ -1,0 +1,15 @@
+{
+  "name": "claude-pet-launcher",
+  "displayName": "Claude Pet Launcher",
+  "description": "Opens Claude Code and dev servers in the integrated terminal when the Claude desktop pet opens a project.",
+  "version": "0.1.2",
+  "publisher": "claude-pet",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": {
+    "untrustedWorkspaces": { "supported": true },
+    "virtualWorkspaces": false
+  },
+  "contributes": {}
+}
