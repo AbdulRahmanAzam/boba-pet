@@ -74,6 +74,9 @@ import chatlog  # noqa: E402
 import news  # noqa: E402
 import hackmode  # noqa: E402
 import pet_paths  # noqa: E402
+import water  # noqa: E402
+import keys  # noqa: E402
+import updater  # noqa: E402
 
 try:  # drag & drop of files / text onto the pet
     from tkinterdnd2 import DND_FILES, DND_TEXT, TkinterDnD
@@ -549,6 +552,17 @@ class ClaudePet:
         self.speak_var = tk.BooleanVar(value=self.state.get("speak", False))
         self.tools_var = tk.BooleanVar(value=self.state.get("always_tools", False))
         self.guard_var = tk.BooleanVar(value=self.state.get("focus_guard", True))
+        self.water_var = tk.BooleanVar(value=self.state.get("water", True))
+        self.water_next = time.time() + water.INTERVAL_SECONDS
+        self.keys_var = tk.BooleanVar(value=self.state.get("key_counter", True))
+        self.key_counter = keys.Counter()
+        self.keys_saved = time.time()
+        if self.keys_var.get():
+            self.key_counter.start()
+        self.app_version = updater.installed_version()
+        self.update_checking = False
+        self.root.after(4000, self.announce_update)
+        self.root.after(updater.FIRST_CHECK_DELAY_MS, self.update_poll)
         self.rim_var = tk.BooleanVar(value=self.state.get("rim", True))
         self.cc_var = tk.BooleanVar(value=self.state.get("cc_alerts", True))
         self.brief_var = tk.BooleanVar(value=self.state.get("briefing", True))
@@ -801,6 +815,14 @@ class ClaudePet:
         usage_menu.add_command(label="Connect Claude Code limits (status line)",
                                command=self.connect_status_line)
         self.menu.add_cascade(label="Usage meter", menu=usage_menu)
+        keys_menu = tk.Menu(self.menu, tearoff=0)
+        keys_menu.add_command(label="Show keystroke stats", command=self.show_keys)
+        keys_menu.add_checkbutton(label="Count keystrokes", variable=self.keys_var,
+                                  command=self.on_keys_toggle)
+        self.menu.add_cascade(label="Keystrokes", menu=keys_menu)
+        self.menu.add_command(
+            label=f"Check for updates (v{self.app_version})" if self.app_version
+            else "Check for updates", command=lambda: self.update_check(manual=True))
         self.menu.add_checkbutton(label="Focus guard (watch for distractions)",
                                   variable=self.guard_var,
                                   command=lambda: self.save_flag("focus_guard",
@@ -809,6 +831,8 @@ class ClaudePet:
                                   variable=self.strict_var,
                                   command=lambda: self.save_flag("strict_focus",
                                                                  self.strict_var))
+        self.menu.add_checkbutton(label="Water reminder (every hour)",
+                                  variable=self.water_var, command=self.on_water_toggle)
         remind = tk.Menu(self.menu, tearoff=0)
         for minutes in REMIND_CHOICES:
             remind.add_radiobutton(label=f"{minutes} min" if minutes else "Off",
@@ -1824,6 +1848,8 @@ class ClaudePet:
             None,
             ("✓", "Tasks", "", self.toggle_tasks),
             ("📊", "Usage", "", self.show_usage),
+            ("⌨", "Keystrokes", keys.short(keys.today_count(self.state)) + " today",
+             self.show_keys),
         ]
         self.open_drop(self.logo_btn, items)
 
@@ -3176,7 +3202,7 @@ class ClaudePet:
                 actions.insert(0, ("Open submit page", lambda: os.startfile(link)))
             done_n, total = hackmode.readiness(ws)
             self.remind(f"⏰ **{event.get('name')}**\n{due[1]}\n"
-                        f"_Checklist: {done_n}/{total} ready._", actions,
+                        f"*Checklist: {done_n}/{total} ready.*", actions,
                         speak=due[1], shake=due[0] <= 2)
 
     def coach_prompt_event(self, prompt: str, project: str) -> None:
@@ -3347,6 +3373,172 @@ class ClaudePet:
             return [("Open tasks", self.toggle_tasks)]
         return [("Open tasks", self.toggle_tasks),
                 ("Snooze 10 min", self.guard.snooze)]
+
+    # ---------- keystroke counter ----------
+    def on_keys_toggle(self) -> None:
+        self.save_flag("key_counter", self.keys_var)
+        if self.keys_var.get():
+            if not self.key_counter.start():
+                self.status("Couldn't start the keystroke counter.", "error")
+        else:
+            self.count_keys(save=True)
+            self.key_counter.stop()
+
+    def count_keys(self, save: bool = False) -> None:
+        """Move new presses into today's count; save about once a minute."""
+        record, milestone = keys.add(self.state, self.key_counter.take())
+        now = time.time()
+        if save or record or milestone or now - self.keys_saved > 60:
+            self.keys_saved = now
+            save_state(self.state)
+        if milestone:
+            total = keys.stats(self.state)["total"]
+            self.cc_show(f"⌨ **{keys.short(total)} keystrokes** typed with me! 🎉",
+                         [("Stats", self.show_keys)], shake=False, auto_hide=8,
+                         tag="Keystrokes")
+        elif record:
+            self.cc_show(f"⌨ **New record!** {keys.today_count(self.state):,} keys "
+                         "today, your best day yet. 🔥",
+                         [("Stats", self.show_keys)], shake=False, auto_hide=8,
+                         tag="Keystrokes")
+
+    def show_keys(self) -> None:
+        self.count_keys()
+        md = keys.summary(self.state)
+        if not self.keys_var.get():
+            md += "\n\n*Counting is off (menu > Keystrokes).*"
+        self.cc_show(md, [], shake=False, auto_hide=None, tag="Keystrokes")
+
+    # ---------- updates ----------
+    def update_poll(self) -> None:
+        try:
+            self.update_check()
+        finally:
+            self.root.after(updater.CHECK_EVERY_SECONDS * 1000, self.update_poll)
+
+    def update_check(self, manual: bool = False) -> None:
+        """Ask about a newer release once a day, after an AI is linked."""
+        if not self.app_version:
+            if manual:
+                self.status("Running from source: update with git pull.", "info")
+            return
+        if self.update_checking:
+            return
+        if not manual and (not self.linked()
+                           or self.state.get("update_asked_day") == updater.today()):
+            return
+        self.update_checking = True
+        if manual:
+            self.status("Checking for updates…", "info")
+        current = self.app_version
+
+        def work() -> None:
+            try:
+                latest = updater.latest_version()
+            except (OSError, ValueError, KeyError) as e:
+                self.post(lambda: self.update_done(manual and f"Couldn't check for updates: {e}"))
+                return
+            if not updater.newer(latest, current):
+                self.post(lambda: self.update_done(
+                    manual and f"Boba is up to date (v{current})."))
+                return
+            notes = updater.release_notes(latest)
+            self.post(lambda: (self.update_done(""), self.offer_update(latest, notes)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_done(self, message: str | bool) -> None:
+        self.update_checking = False
+        if message:
+            self.status(str(message), "info")
+
+    def offer_update(self, latest: str, notes: str) -> None:
+        self.state["update_asked_day"] = updater.today()  # "Later" = ask tomorrow
+        save_state(self.state)
+        md = f"✨ **Boba v{latest} is ready!** You have v{self.app_version}."
+        if notes:
+            md += f"\n\n{notes}"
+        self.cc_show(md, [("Update now", lambda: self.update_now(latest)),
+                          ("Later", self.update_later),
+                          ("What's new", lambda: webbrowser.open(updater.RELEASES_PAGE))],
+                     shake=False, auto_hide=None, tag="Update")
+
+    def update_later(self) -> None:
+        self.fx.hide(self.bubble)
+        self.status("OK, I'll ask again tomorrow.", "info")
+
+    def update_now(self, latest: str) -> None:
+        log = pet_paths.DATA_DIR / "update.log"
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            updater.start_update(log)
+        except OSError as e:
+            self.status(f"Update failed to start: {e}", "error")
+            return
+        self.cc_show(f"⏳ Updating to **v{latest}**… I'll be back in a moment.", [],
+                     shake=False, auto_hide=None, tag="Update")
+        self.root.after(1500, self.quit)
+
+    def announce_update(self) -> None:
+        """First start after an update: say so, with the release notes."""
+        if not self.app_version:
+            return
+        last = self.state.get("last_version")
+        self.state["last_version"] = self.app_version
+        save_state(self.state)
+        if not last or not updater.newer(self.app_version, last):
+            return
+        ver = self.app_version
+
+        def work() -> None:
+            notes = updater.release_notes(ver)
+            md = f"🎉 **Updated to v{ver}!**" + (f"\n\n{notes}" if notes else "")
+            self.post(lambda: self.cc_show(md, [], shake=False, auto_hide=20, tag="Update"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- water reminder ----------
+    def on_water_toggle(self) -> None:
+        self.save_flag("water", self.water_var)
+        self.water_next = time.time() + water.INTERVAL_SECONDS
+        if self.water_var.get():
+            self.status("Water reminder on: one glass every hour.", "info")
+
+    def check_water(self) -> None:
+        if not self.water_var.get():
+            return
+        if water.due(self.water_next, time.time(), water.idle_seconds()):
+            self.water_alarm()
+
+    def water_alarm(self) -> None:
+        """Ring, show the bubble, then say it out loud after the chime."""
+        self.water_next = time.time() + water.SNOOZE_SECONDS  # until answered
+        n = water.glasses_today(self.state)
+        water.chime()
+        self.remind(f"💧 **Water time!** Drink **1 glass of water** now.\n"
+                    f"*Today: {n}/{water.DAILY_GOAL} glasses.*",
+                    [("I drank it ✓", self.drank_water),
+                     ("Snooze 10 min", self.snooze_water)], shake=True)
+        self.tool_tag.configure(text="Water")
+        self.root.after(int(water.chime_seconds() * 1000) + 200,
+                        lambda: self.speak(water.SPOKEN))
+
+    def drank_water(self) -> None:
+        n = water.add_glass(self.state)
+        save_state(self.state)
+        self.water_next = time.time() + water.INTERVAL_SECONDS
+        self.stop_speaking()
+        cheer = " Goal reached! 🎉" if n == water.DAILY_GOAL else ""
+        self.remind(f"💧 Nice! **{n}/{water.DAILY_GOAL}** glasses today.{cheer}\n"
+                    "Next reminder in 1 hour.", auto_hide=6)
+        self.tool_tag.configure(text="Water")
+        self.happy_until = self.sparkle_until = time.time() + 2.5
+
+    def snooze_water(self) -> None:
+        self.water_next = time.time() + water.SNOOZE_SECONDS
+        self.stop_speaking()
+        self.fx.hide(self.bubble)
+        self.status("OK, I'll remind you about water in 10 minutes.", "info")
 
     # ---------- attachments: dropped files / text, screenshots ----------
     def build_attach_chip(self) -> None:
@@ -3706,6 +3898,8 @@ class ClaudePet:
 
     def task_poll(self) -> None:
         try:
+            self.count_keys()
+            self.check_water()
             self.check_tasks()
         finally:
             self.root.after(TASK_POLL_MS, self.task_poll)
@@ -5076,6 +5270,8 @@ class ClaudePet:
             self.hide_all()
 
     def quit(self) -> None:
+        self.count_keys(save=True)
+        self.key_counter.stop()
         self.stop_continuous()
         if self.wake:
             self.wake.stop()

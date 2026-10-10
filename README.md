@@ -35,10 +35,15 @@ boba-pet
 or, with [uv](https://docs.astral.sh/uv/), just `uvx boba-pet`. The first
 start downloads the voice models in the background; run `boba-pet-setup`
 once to get them right away and add a Start menu shortcut.
-### Update / uninstall
+### Updates
+
+Boba updates itself. Once you've linked an AI, it checks for a new release and asks **Update now** or **Later** (Later asks again the next day). Update now restarts the pet on the new version in a few seconds. You can also check any time: right-click > **Check for updates**.
+
+On v1.0.0 (before self-updates existed)? Update once by hand: `pip install -U boba-pet`, or run the install line again.
+
+### Uninstall
 
 ```powershell
-uv tool upgrade boba-pet                       # update (or re-run the install line)
 boba-pet-setup --uninstall-shortcuts; uv tool uninstall boba-pet   # remove
 ```
 
@@ -70,6 +75,8 @@ Your settings and models stay in `%USERPROFILE%\.boba-pet` and
 - **Projects**: "open my portfolio project" finds the folder and opens it in
   VS Code with Claude Code running.
 - **Tasks, reminders and focus timer**, with a gentle distraction guard.
+- **Water reminder**: every hour Boba rings a chime and tells you to drink a glass of water, and counts your glasses for the day (goal 8). It waits while you're away from the PC.
+- **Keystroke counter**: counts the keys you press each day and adds them to an all-time total, with a 7-day chart, best-day records and 100k milestones. Only the number is stored, never which keys; software-typed keys don't count.
 - **Hackathons**: track deadlines, and click one for a workspace with a
   checklist, notes, focus sprints, idea/pitch/judge helpers and a prompt coach
   that suggests better Claude Code prompts while you build.
@@ -115,7 +122,7 @@ for your projects.
 | `listener.py`, `wake.py`, `speak.ps1` | Mic input (Whisper), wake word (Vosk), text to speech |
 | `cc_watch.py`, `pet_hook.py`, `pet_status.py`, `usage.py` | Claude Code session watching and usage meter |
 | `projects.py`, `vscode-ext/` | Project search and the VS Code launcher extension |
-| `tasks.py`, `focus.py` | Tasks, reminders, focus timer visuals |
+| `tasks.py`, `focus.py`, `water.py`, `keys.py` | Tasks, reminders, focus timer visuals, hourly water reminder, keystroke counter |
 | `hackathons.py`, `hackmode.py` | Hackathon tracker and hackathon mode |
 | `news.py` | Morning briefing from RSS/Atom feeds |
 | `computer.py`, `pet_mcp.py` | Computer tools and their MCP server |
