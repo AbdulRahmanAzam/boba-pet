@@ -550,6 +550,9 @@ def compose(character: str = DEFAULT_CHARACTER, **pose: object) -> Grid:
     return add_mark(grid, mark, mark_f) if mark else grid
 
 
+CACHE_MAX = 256  # scaled frames kept (each is ~100 KB at the default zoom)
+
+
 class SpriteCache:
     """Turns composed frames into scaled Tk images, built once per pose."""
 
@@ -559,7 +562,7 @@ class SpriteCache:
         self.scale = scale
         self.rim = rim  # light outline color, so the pet shows on dark wallpapers
         self.rim_px = rim_px
-        self.cache: dict[tuple, tk.PhotoImage] = {}
+        self.cache: dict[tuple, tk.PhotoImage] = {}  # oldest first (LRU)
 
     def set_rim(self, rim: str | None) -> None:
         if rim != self.rim:
@@ -568,10 +571,14 @@ class SpriteCache:
 
     def get(self, **pose: object) -> tk.PhotoImage:
         key = tuple(sorted(pose.items()))
-        if key not in self.cache:
+        img = self.cache.pop(key, None)
+        if img is None:
             grid = compose(**pose)  # type: ignore[arg-type]
-            self.cache[key] = self.outlined(grid) if self.rim else self.plain(grid)
-        return self.cache[key]
+            img = self.outlined(grid) if self.rim else self.plain(grid)
+            while len(self.cache) >= CACHE_MAX:  # bounded: no slow memory creep
+                self.cache.pop(next(iter(self.cache)))
+        self.cache[key] = img  # re-insert: most recently used goes last
+        return img
 
     def plain(self, grid: Grid) -> tk.PhotoImage:
         img = tk.PhotoImage(width=SIZE, height=SIZE)

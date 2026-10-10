@@ -27,6 +27,11 @@ GRAMMAR = {"hey bob": "hey bob", "hey babe": "hey babe", "hey bubba": "hey boba"
            "hey bob a": "hey boba", "hey bobo": "hey boba", "hey boa": "hey boba"}
 MIN_CONFIDENCE = 0.6  # average word confidence needed to wake
 COOLDOWN_SECONDS = 2.0
+# Silence gate: the recognizer only runs while there is sound (plus a short
+# tail so it can see the end of a phrase). A quiet room costs almost no CPU.
+GATE_MIN = 0.003  # RMS below this is always silence
+GATE_FACTOR = 3.0  # sound = this many times the room's noise floor
+GATE_TAIL_SECONDS = 1.2
 
 
 def available() -> str:
@@ -125,6 +130,7 @@ class WakeWord:
                     chunks.put(data[:, 0].copy())
 
             last_wake, was_paused = 0.0, False
+            noise, open_until, feeding = GATE_MIN, 0.0, False
             with sd.InputStream(samplerate=device_rate, channels=1, dtype="float32",
                                 blocksize=int(device_rate * 0.1), callback=callback):
                 while not self.stopped.is_set():
@@ -141,7 +147,23 @@ class WakeWord:
                         chunk = chunks.get(timeout=0.2)
                     except queue.Empty:
                         continue
-                    phrase = spotter.feed(resample(chunk, device_rate))
+                    level = float(np.sqrt(np.mean(chunk * chunk))) if chunk.size else 0.0
+                    now = time.time()
+                    if level > max(GATE_MIN, noise * GATE_FACTOR):
+                        open_until = now + GATE_TAIL_SECONDS
+                    else:
+                        noise = 0.97 * noise + 0.03 * level
+                    if now > open_until:
+                        if not feeding:
+                            continue
+                        # sound just ended: take any phrase still pending,
+                        # then start clean for the next sound
+                        feeding = False
+                        phrase = spotter.flush()
+                        spotter.reset()
+                    else:
+                        feeding = True
+                        phrase = spotter.feed(resample(chunk, device_rate))
                     if phrase and time.time() - last_wake > COOLDOWN_SECONDS:
                         last_wake = time.time()
                         self.paused.set()  # the pet resumes us when it's done

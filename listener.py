@@ -24,20 +24,42 @@ PAUSE_SECONDS = 0.8  # silence that ends a phrase
 MAX_PHRASE_SECONDS = 12  # force-commit long phrases to keep passes fast
 LANG_PROBE_SECONDS = 1.5  # audio needed before trusting language detection
 
+UNLOAD_AFTER_SECONDS = 10 * 60  # free the model's RAM when the mic sits unused
+
 _model = None
 _model_lock = threading.Lock()
+_last_used = 0.0
+_active = 0  # listeners running right now (never unload under them)
 
 
 def load_model():
-    """Load Whisper once; it stays in memory for the next mic use."""
-    global _model
+    """Load Whisper on first use; unload_if_idle() frees it again later."""
+    global _model, _last_used
     with _model_lock:
         if _model is None:
             from faster_whisper import WhisperModel
 
             _model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8",
                                   cpu_threads=4, download_root=str(MODELS_DIR))
+        _last_used = time.time()
     return _model
+
+
+def loaded() -> bool:
+    return _model is not None
+
+
+def unload_if_idle(idle_seconds: float = UNLOAD_AFTER_SECONDS) -> bool:
+    """Drop the model when no mic has used it for idle_seconds. True if freed."""
+    global _model
+    with _model_lock:
+        if _model is None or _active or time.time() - _last_used < idle_seconds:
+            return False
+        _model = None
+    import gc
+
+    gc.collect()
+    return True
 
 
 def preload() -> None:
@@ -99,6 +121,9 @@ class LiveListener:
         return text
 
     def run(self) -> None:
+        global _active, _last_used
+        with _model_lock:
+            _active += 1
         try:
             import sounddevice as sd
 
@@ -166,6 +191,9 @@ class LiveListener:
         except Exception as exc:  # report any mic/model failure to the UI
             self.on_error(f"Mic error: {exc}")
         finally:
+            with _model_lock:
+                _active -= 1
+                _last_used = time.time()
             self.on_done()
 
 

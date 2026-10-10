@@ -48,14 +48,51 @@ from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
+# Small footprint: one math thread per library (each BLAS/OpenMP thread
+# reserves its own buffers) and no progress-bar threads from model downloads.
+# Must run before numpy or any model library is imported.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 from ui_fx import (Fader, enable_dpi_awareness, hwnd_of, lerp_color, pick_font,
                    render_markdown, round_corners, set_border, setup_markdown)
 
 DPI_SCALE = enable_dpi_awareness()  # must run before any Tk window exists
-try:  # 1 ms timer resolution so Tk's after() can really hit ~60 fps
-    ctypes.windll.winmm.timeBeginPeriod(1)
-except (AttributeError, OSError):
-    pass
+_fast_timer = False
+
+
+def fast_timer(on: bool) -> None:
+    """1 ms timer resolution, only while animating, so Tk's after() can hit
+    ~60 fps. At rest Windows' normal 15.6 ms tick saves power and CPU."""
+    global _fast_timer
+    if on == _fast_timer:
+        return
+    _fast_timer = on
+    try:
+        winmm = ctypes.windll.winmm
+        (winmm.timeBeginPeriod if on else winmm.timeEndPeriod)(1)
+    except (AttributeError, OSError):
+        pass
+
+
+def release_memory() -> None:
+    """Hand unused RAM back to Windows: collect garbage, then trim the
+    working set (pages come back on their own if needed)."""
+    import gc
+
+    gc.collect()
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessWorkingSetSize.argtypes = (wintypes.HANDLE, ctypes.c_size_t,
+                                                      ctypes.c_size_t)
+        kernel32.SetProcessWorkingSetSize(kernel32.GetCurrentProcess(),
+                                          ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
+    except (AttributeError, OSError):
+        pass
 
 from sprites import CHARACTERS, DEFAULT_CHARACTER, SIZE, SpriteCache, compose  # noqa: E402
 
@@ -198,7 +235,10 @@ HOP_ROOM = 5 * ZOOM  # headroom for hops
 SHADOW_ROOM = 2 * ZOOM
 PET_W = SPRITE_PX + 2 * SWAY_ROOM
 PET_H = HOP_ROOM + SPRITE_PX + SHADOW_ROOM
-TICK_MS = 16  # ~60 fps
+TICK_MS = 16  # ~60 fps, only while something moves
+IDLE_TICK_MS = 100  # awake but calm
+IDLE_SLEEP_MS = 200  # asleep (also how fast hotkeys are picked up)
+MEMORY_POLL_MS = 60_000  # check for models to unload / RAM to give back
 SPRITE_FPS = 16.7  # pose timing base (sprites were authored at this rate)
 SLEEP_AFTER_SECONDS = 3 * 60
 # idle strolls along the taskbar
@@ -676,8 +716,10 @@ class ClaudePet:
         self.root.after(20_000, lambda: threading.Thread(
             target=self.warm_projects, daemon=True).start())
         self.start_hotkeys()
-        if preload_whisper:
-            self.root.after(3000, preload_whisper)  # warm the model after startup
+        # Whisper is not preloaded: it loads when the ask box opens or the mic
+        # starts, and unloads after 10 idle minutes (see free_idle_memory).
+        self.memory_trimmed = self.startup_trimmed = False
+        self.root.after(MEMORY_POLL_MS, self.free_idle_memory)
         self.tick()
         self.keep_on_top()
         self.start_hop(0.5, 4 * ZOOM)  # little hello on startup
@@ -1382,31 +1424,38 @@ class ClaudePet:
 
     def tick(self) -> None:
         """One animation frame: run queued events, then draw."""
-        while not self.events.empty():
-            self.events.get_nowait()()
-        now = time.perf_counter()
-        if now > self.next_blink:
-            self.blink_until = now + 0.14
-            self.next_blink = now + random.uniform(2.5, 6)
-            if random.random() < 0.25:  # sometimes a double blink
-                self.next_blink = now + 0.35
-        if now > self.hat_tip_until and random.random() < 0.0004:
-            self.hat_tip_until = now + 0.6
-        # drag sway: spring toward the target, target eases back to rest
-        if self.cc_waiting and not self.drag_start and not self.walk:
-            self.sway_target = math.sin((now - self.t0) * 9) * 1.6 * ZOOM  # waving
-            if now > self.next_wave_hop:
-                self.next_wave_hop = now + WAVE_HOP_SECONDS
-                self.start_hop(0.36, 5 * ZOOM)
-        self.sway += (self.sway_target - self.sway) * 0.25
-        self.sway_target *= 0.85
-        if self.wake:  # the wake word rests while the mic or voice is busy
-            self.wake.pause(self.listening or self.finishing or self.is_speaking()
-                            or self.wake_session or self.cont is not None)
-        self.update_walk(now)
-        self.draw_pet(now)
-        self.update_ui(now)
-        self.root.after(self.frame_ms(), self.tick)
+        try:
+            while not self.events.empty():
+                try:
+                    self.events.get_nowait()()
+                except Exception:  # noqa: BLE001 - the other queued events still run
+                    pass
+            now = time.perf_counter()
+            if now > self.next_blink:
+                self.blink_until = now + 0.14
+                self.next_blink = now + random.uniform(2.5, 6)
+                if random.random() < 0.25:  # sometimes a double blink
+                    self.next_blink = now + 0.35
+            if now > self.hat_tip_until and random.random() < 0.0004:
+                self.hat_tip_until = now + 0.6
+            # drag sway: spring toward the target, target eases back to rest
+            if self.cc_waiting and not self.drag_start and not self.walk:
+                self.sway_target = math.sin((now - self.t0) * 9) * 1.6 * ZOOM  # waving
+                if now > self.next_wave_hop:
+                    self.next_wave_hop = now + WAVE_HOP_SECONDS
+                    self.start_hop(0.36, 5 * ZOOM)
+            self.sway += (self.sway_target - self.sway) * 0.25
+            self.sway_target *= 0.85
+            if self.wake:  # the wake word rests while the mic or voice is busy
+                self.wake.pause(self.listening or self.finishing or self.is_speaking()
+                                or self.wake_session or self.cont is not None)
+            self.update_walk(now)
+            self.draw_pet(now)
+            self.update_ui(now)
+        except Exception:  # noqa: BLE001 - one bad frame must never stop the pet
+            pass
+        finally:
+            self.root.after(self.frame_ms(), self.tick)
 
     def frame_ms(self) -> int:
         """60 fps while things move, less when calm, to save CPU."""
@@ -1416,9 +1465,11 @@ class ClaudePet:
                   or self.listening or abs(self.sway) > 0.05 or self.fx.jobs
                   or self.reveal_shown < self.reveal_total or self.is_speaking()
                   or self.ring.particles or self.glow.animating())
+        fast_timer(bool(active))
         if active:
             return TICK_MS
-        return 66 if self.sleeping() else 33
+        # Calm: breathing and eye moves are slow, a few frames a second do.
+        return IDLE_SLEEP_MS if self.sleeping() else IDLE_TICK_MS
 
     def update_ui(self, now: float) -> None:
         """Per-frame UI touches: mic pulse, thinking timer, text reveal."""
@@ -1911,6 +1962,8 @@ class ClaudePet:
     def show_bar(self) -> None:
         self.fx.hide(self.hover)
         self.last_active = time.time()
+        if preload_whisper:  # you may talk next: warm the mic model meanwhile
+            preload_whisper()
         self.place_popups()
         self.fx.show(self.bar, slide=-1 if self.bar_below else 1)
         self.focus_input(self.bar, self.entry)
@@ -3374,6 +3427,34 @@ class ClaudePet:
         return [("Open tasks", self.toggle_tasks),
                 ("Snooze 10 min", self.guard.snooze)]
 
+    # ---------- memory ----------
+    def free_idle_memory(self) -> None:
+        """Every minute: unload models nobody used for a while, and give RAM
+        back to Windows once when the pet falls asleep."""
+        try:
+            freed = False
+            try:
+                import listener
+
+                freed = listener.unload_if_idle()
+            except ImportError:
+                pass
+            if self.sleeping() and not self.busy:
+                if self.searcher.model is not None:
+                    self.searcher.model = self.searcher.matrix = None
+                    self.searcher.key = ()
+                    freed = True
+                if freed or not self.memory_trimmed:
+                    release_memory()
+                    self.memory_trimmed = True
+            else:
+                self.memory_trimmed = False
+                if freed or not self.startup_trimmed:  # startup leaves garbage too
+                    release_memory()
+                    self.startup_trimmed = True
+        finally:
+            self.root.after(MEMORY_POLL_MS, self.free_idle_memory)
+
     # ---------- keystroke counter ----------
     def on_keys_toggle(self) -> None:
         self.save_flag("key_counter", self.keys_var)
@@ -4484,9 +4565,10 @@ class ClaudePet:
             return self.project_list
 
     def warm_projects(self) -> None:
-        """Startup: load (or build) the index and the tiny embedding model."""
+        """Startup: load (or build) the project index. The embedding model
+        loads on the first project search instead, to keep startup RAM low."""
         try:
-            self.searcher.ready(self.project_index())
+            self.project_index()
         except Exception:  # warming is best effort; the request retries
             pass
         try:  # companion extension that runs Claude in VS Code's terminal

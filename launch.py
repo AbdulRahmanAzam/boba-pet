@@ -21,6 +21,12 @@ USAGE = """usage: boba-pet [--setup] [--autostart] [--uninstall-shortcuts] [--ve
 
 
 def main() -> int:
+    # Same small-footprint limits as claude_pet.py, set before any model
+    # library loads (first-run model downloads start before the pet does).
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
     args = sys.argv[1:]

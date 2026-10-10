@@ -15,11 +15,13 @@ The pet's own `claude -p` calls (entrypoint "sdk-cli") are skipped.
 """
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+FULL_SCAN_SECONDS = 60  # list every transcript at most this often
 RECENT_SECONDS = 15 * 60  # only transcripts written this recently are read
 STALL_SECONDS = 10 * 60  # a "running" turn this quiet has died or is stuck
 FIRST_READ_BYTES = 256 * 1024  # catching up on an already-open transcript
@@ -105,14 +107,39 @@ class Watcher:
         self.sessions: dict[str, Session] = {}
         self.primed = False  # the first poll only learns state, no events
         self.prompt_dirs: list[str] = []  # folders whose prompts become events
+        # Cheap discovery: a project folder's mtime changes when a transcript
+        # is created in it, so only changed folders are listed; known recent
+        # transcripts are just stat()ed. A full listing runs every FULL_SCAN.
+        self.dir_mtimes: dict[Path, float] = {}
+        self.last_full = 0.0
 
     def poll(self) -> list[Event]:
         """Read new transcript lines. Returns events since the last poll."""
         now = time.time()
         events: list[Event] = []
+        full = now - self.last_full > FULL_SCAN_SECONDS
+        if full:
+            self.last_full = now
         for cfg in config_dirs():
             account = account_of(cfg)
-            for path in (cfg / "projects").glob("*/*.jsonl"):
+            try:
+                folders = list(os.scandir(cfg / "projects"))
+            except OSError:
+                continue
+            candidates: list[Path] = []
+            for entry in folders:
+                if not entry.is_dir():
+                    continue
+                folder = Path(entry.path)
+                try:
+                    mtime = entry.stat().st_mtime
+                except OSError:
+                    continue
+                if full or self.dir_mtimes.get(folder) != mtime:
+                    self.dir_mtimes[folder] = mtime
+                    candidates += folder.glob("*.jsonl")
+            candidates += [p for p in self.files if p.parent.parent == cfg / "projects"]
+            for path in dict.fromkeys(candidates):
                 try:
                     st = path.stat()
                 except OSError:
