@@ -8,7 +8,7 @@
 # $env:BOBA_PET_AUTOSTART = "1" first to also start the pet with Windows.
 
 $ErrorActionPreference = "Stop"
-$Source = "https://github.com/AbdulRahmanAzam/boba-pet/archive/refs/heads/main.zip"
+$Source = "boba-pet"  # from PyPI
 
 function Step($text) { Write-Host "==> $text" -ForegroundColor Magenta }
 
