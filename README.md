@@ -28,13 +28,13 @@ No admin rights, no git clone. To also start the pet with Windows, run
 ### Already have Python 3.11+?
 
 ```powershell
-pip install https://github.com/AbdulRahmanAzam/boba-pet/archive/refs/heads/main.zip
-boba-pet-setup   # one time: models + Start menu shortcut
-boba-pet         # start the pet
+pip install boba-pet
+boba-pet
 ```
 
-or with uv: `uv tool install https://github.com/AbdulRahmanAzam/boba-pet/archive/refs/heads/main.zip`.
-
+or, with [uv](https://docs.astral.sh/uv/), just `uvx boba-pet`. The first
+start downloads the voice models in the background; run `boba-pet-setup`
+once to get them right away and add a Start menu shortcut.
 ### Update / uninstall
 
 ```powershell
