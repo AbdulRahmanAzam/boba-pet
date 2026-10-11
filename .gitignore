@@ -13,3 +13,5 @@ models/
 test folders/
 *.vsix
 *.log
+
+brag-output/

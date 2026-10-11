@@ -80,7 +80,9 @@ Your settings and models stay in `%USERPROFILE%\.boba-pet` and
 - **Hackathons**: track deadlines, and click one for a workspace with a
   checklist, notes, focus sprints, idea/pitch/judge helpers and a prompt coach
   that suggests better Claude Code prompts while you build.
-- **Morning tech briefing** from real news feeds, every item linked to its source.
+- **News briefings, 3 a day**: a morning briefing with your tasks and the top AI & tech
+  news, then a short update with anything new every 4 hours. Real news feeds, every item
+  linked to its source, and no story is shown twice.
 - **Screenshots**: snip part of the screen and ask about it.
 - **Computer tools** (optional): the AI can open apps, change volume, type and
   so on. By default it **asks you first** for anything risky; set the mode in
@@ -124,7 +126,7 @@ for your projects.
 | `projects.py`, `vscode-ext/` | Project search and the VS Code launcher extension |
 | `tasks.py`, `focus.py`, `water.py`, `keys.py` | Tasks, reminders, focus timer visuals, hourly water reminder, keystroke counter |
 | `hackathons.py`, `hackmode.py` | Hackathon tracker and hackathon mode |
-| `news.py` | Morning briefing from RSS/Atom feeds |
+| `news.py` | News briefings from RSS/Atom feeds |
 | `computer.py`, `pet_mcp.py` | Computer tools and their MCP server |
 | `snip.py`, `ui_fx.py` | Screen snipping, fades, markdown and other UI helpers |
 | `launch.py`, `pet_setup.py`, `pet_paths.py` | Installed command, first-run setup, data folders |

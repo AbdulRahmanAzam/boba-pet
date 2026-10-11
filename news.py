@@ -28,7 +28,7 @@ FEEDS = (
     ("The Verge", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
     ("TechCrunch", "https://techcrunch.com/category/artificial-intelligence/feed/"),
     ("Ars Technica", "https://feeds.arstechnica.com/arstechnica/technology-lab"),
-    ("Simon Willison", "https://simonwillison.net/atom/everything/"),
+    ("Simon Willison", "https://simonwillison.net/atom/entries/"),  # posts, not quotes/links
     ("Hacker News", "https://hnrss.org/frontpage?points=300"),
     ("Claude Code", "https://github.com/anthropics/claude-code/releases.atom"),
     ("Codex CLI", "https://github.com/openai/codex/releases.atom"),
@@ -42,6 +42,22 @@ MAX_ITEMS = 80
 WINDOW_DAYS = 7
 SNIPPET_CHARS = 160
 PRERELEASE = re.compile(r"alpha|beta|rc\d|-pre|nightly", re.I)
+# Stock tickers, deal posts and horoscopes that Google News mixes into AI
+# searches. Finance sites also re-date old rumors, so they're skipped.
+JUNK_SITES = ("stocktwits", "simply wall st", "yahoo finance", "benzinga",
+              "motley fool", "investing.com", "marketbeat", "seeking alpha")
+JUNK_TITLE = re.compile(r"horoscope|lifetime access|for life\b|deal days|"
+                        r"\bstock\b|shares (rise|fall|gain|jump)|price target", re.I)
+OFFICIAL = ("OpenAI", "Google", "Anthropic")  # their own blogs
+AI_WORDS = re.compile(r"\b(ai|model|gpt|claude|gemini|anthropic|openai|deepmind|llm|"
+                      r"agents?|codex|copilot|cursor|launch\w*|releas\w*)\b", re.I)
+# Words too common to tell two stories apart.
+STOP = {"the", "and", "for", "with", "that", "this", "from", "into", "says", "after",
+        "about", "its", "new", "how", "what", "why", "will", "your", "are", "has",
+        "can", "now", "not", "our", "you", "their", "more", "than", "just", "over",
+        "google", "openai", "anthropic", "microsoft", "apple", "meta", "model",
+        "models", "agent", "agents", "launch", "launches", "release", "released"}
+SEEN_DAYS = 14  # don't repeat a story shown in a briefing this recently
 
 PICK_PROMPT = """Today is {today}. Below are numbered news items from the past week, read from publisher feeds. Pick the {count} most important for someone who builds with AI: new AI models, AI developer tools (Claude Code, Codex, Cursor, Copilot), major AI company news, notable tech launches. Prefer items published since {since}. Skip minor product tie-ins, opinion pieces, duplicates and anything not actually news.
 
@@ -124,21 +140,68 @@ def _key(title: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", title.lower())[:8])
 
 
-def collect(now: datetime | None = None) -> list[dict]:
-    """News items from the last WINDOW_DAYS, newest first, deduplicated."""
+def _junk(item: dict) -> bool:
+    site = source_name(item).lower()
+    return any(j in site for j in JUNK_SITES) or bool(JUNK_TITLE.search(item["title"]))
+
+
+def collect(now: datetime | None = None, seen: dict | None = None) -> list[dict]:
+    """News items from the last WINDOW_DAYS, newest first, deduplicated.
+
+    Junk (stock tips, deals, horoscopes) and stories already shown in a
+    recent briefing (`seen`, from remember()) are left out.
+    """
     now = now or datetime.now(timezone.utc)
+    seen = seen or {}
     cutoff = now - timedelta(days=WINDOW_DAYS)
     with cf.ThreadPoolExecutor(8) as pool:
         batches = list(pool.map(_fetch, FEEDS))
-    seen, items = set(), []
+    keys, items = set(), []
     for item in sorted((i for b in batches for i in b), key=lambda i: i["date"],
                        reverse=True):
         key = _key(item["title"])
-        if item["date"] < cutoff or item["date"] > now + timedelta(hours=12) or key in seen:
+        if (item["date"] < cutoff or item["date"] > now + timedelta(hours=12)
+                or key in keys or key in seen or _junk(item)):
             continue
-        seen.add(key)
+        keys.add(key)
         items.append(item)
     return items[:MAX_ITEMS]
+
+
+def _words(title: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9.]+", title.lower())
+            if len(w) > 2 and w not in STOP}
+
+
+def rank(items: list[dict], since: str) -> list[dict]:
+    """Most important first, without a model: stories many outlets cover,
+    official announcements and AI news score high; older than `since`
+    (YYYY-MM-DD, local time) low."""
+    start = datetime.strptime(since, "%Y-%m-%d").astimezone()
+    words = [_words(it["title"]) for it in items]
+
+    def score(n: int) -> float:
+        it = items[n]
+        covered = sum(1 for m, w in enumerate(words) if m != n and len(w & words[n]) >= 2)
+        return (min(covered, 6) * 2 + 3 * (it["publisher"] in OFFICIAL)
+                + 2 * bool(AI_WORDS.search(it["title"])) - 4 * (it["date"] < start))
+
+    order = sorted(range(len(items)), key=lambda n: (-score(n), -items[n]["date"].timestamp()))
+    out, taken = [], []
+    for n in order:  # one item per story
+        if any(len(words[n] & words[m]) >= 2 for m in taken):
+            continue
+        taken.append(n)
+        out.append(items[n])
+    return out
+
+
+def remember(seen: dict, items: list[dict], today: str) -> dict:
+    """`seen` plus the items just shown, minus entries older than SEEN_DAYS."""
+    keep = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=SEEN_DAYS)).strftime("%Y-%m-%d")
+    out = {k: d for k, d in seen.items() if d >= keep}
+    out.update({_key(it["title"]): today for it in items})
+    return out
 
 
 def day_label(when: datetime) -> str:
@@ -164,14 +227,15 @@ def source_name(item: dict) -> str:
     return urlparse(item["url"]).netloc.removeprefix("www.")
 
 
-def render(reply: str, items: list[dict]) -> str:
+def render(reply: str, items: list[dict], shown: list[dict] | None = None) -> str:
     """Model lines "- [N] **Headline** - why" into bullets with real links.
 
     Lines naming an unknown item are dropped, so nothing unsourced shows.
+    The items used are appended to `shown`.
     """
     out, used = [], set()
     for line in reply.splitlines():
-        m = re.match(r"\s*[-*•]?\s*\[(\d+)\]\s*(.+)", line)
+        m = re.match(r"\s*(?:[-*•]|\d+[.)])?\s*\**\[(\d+)\]\**\s*(.+)", line)
         if not m:
             continue
         n = int(m.group(1))
@@ -179,6 +243,8 @@ def render(reply: str, items: list[dict]) -> str:
             continue
         used.add(n)
         it = items[n - 1]
+        if shown is not None:
+            shown.append(it)
         body = m.group(2).strip()
         head, _, why = body.partition(" - ")
         out.append(f"- {head.strip()} ({day_label(it['date'])}) - {why.strip() or it['title']}"
@@ -186,7 +252,11 @@ def render(reply: str, items: list[dict]) -> str:
     return "\n".join(out)
 
 
-def fallback(items: list[dict], count: int = 5) -> str:
-    """Headlines straight from the feeds, when the model call fails."""
+def fallback(items: list[dict], since: str, count: int = 5,
+             shown: list[dict] | None = None) -> str:
+    """The top headlines by rank(), when the model call fails."""
+    top = rank(items, since)[:count]
+    if shown is not None:
+        shown.extend(top)
     return "\n".join(f"- **{it['title']}** ({day_label(it['date'])}) "
-                     f"([{source_name(it)}]({it['url']}))" for it in items[:count])
+                     f"([{source_name(it)}]({it['url']}))" for it in top)

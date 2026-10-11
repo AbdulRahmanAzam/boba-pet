@@ -293,6 +293,10 @@ SHOT_ACTIONS = {
 BRIEF_HOUR = 5
 BRIEF_POLL_MS = 60_000
 BRIEF_IDLE_MAX = 120  # seconds since last keyboard/mouse input = "you're here"
+# After the morning briefing, news updates every NEWS_GAP_S, NEWS_PER_DAY in all.
+NEWS_PER_DAY = 3
+NEWS_GAP_S = 4 * 3600
+NEWS_UPDATE_COUNT = 3  # items in a later update (the morning one has 5)
 STREAM_FRAME_S = 0.045  # redraw streamed text at most ~22 times a second
 
 
@@ -779,7 +783,7 @@ class ClaudePet:
                 label=label, value=value, variable=self.editor_var,
                 command=lambda: self.save_flag("editor", self.editor_var))
         self.menu.add_cascade(label="Projects", menu=project_menu)
-        self.menu.add_command(label="Morning briefing now",
+        self.menu.add_command(label="News briefing now",
                               command=lambda: self.start_briefing())
         self.menu.add_command(label=self.focus_menu_label(),
                               command=self.focus_menu)
@@ -834,7 +838,7 @@ class ClaudePet:
                                   command=self.on_speak_toggle)
         self.menu.add_command(label="Stop speaking", command=self.stop_speaking)
         self.menu.add_separator()
-        self.menu.add_checkbutton(label="Morning briefing",
+        self.menu.add_checkbutton(label="News briefings (3 a day)",
                                   variable=self.brief_var,
                                   command=lambda: self.save_flag("briefing",
                                                                  self.brief_var))
@@ -3769,19 +3773,27 @@ class ClaudePet:
         self.offer_attachment(att, "📷 **Got it.** Ask anything, or:", SHOT_ACTIONS)
         self.show_bar()
 
-    # ---------- morning briefing ----------
+    # ---------- morning briefing and news updates ----------
     def brief_poll(self) -> None:
+        """The morning briefing at the first activity of the day, then a news
+        update every NEWS_GAP_S while you're at the PC, NEWS_PER_DAY in all."""
         try:
             today = time.strftime("%Y-%m-%d")
-            if (self.brief_var.get() and self.state.get("briefing_day") != today
-                    and time.localtime().tm_hour >= BRIEF_HOUR
+            if (self.brief_var.get() and time.localtime().tm_hour >= BRIEF_HOUR
                     and idle_seconds() < BRIEF_IDLE_MAX
                     and not self.busy and not self.briefing):
-                self.start_briefing()
+                if self.state.get("briefing_day") != today:
+                    self.start_briefing()
+                elif (self.state.get("news_runs", 1) < NEWS_PER_DAY
+                        and time.time() - self.state.get("news_last", 0) >= NEWS_GAP_S):
+                    self.start_briefing(update=True)
         finally:
             self.root.after(BRIEF_POLL_MS, self.brief_poll)
 
-    def start_briefing(self) -> None:
+    def start_briefing(self, update: bool = False) -> None:
+        """Tasks plus the top AI & tech news. An `update` is news only, from
+        items published since the last briefing, and shows nothing if there
+        are none."""
         if self.briefing or not self.linked():
             return
         self.briefing = True
@@ -3790,28 +3802,57 @@ class ClaudePet:
         week_ago = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
         yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
         since = last if last and week_ago <= last < today else yesterday
-        self.state["briefing_day"] = today
+        after = self.state.get("news_last", 0) if update else 0
+        if update:
+            since = today
+            self.state["news_runs"] = self.state.get("news_runs", 0) + 1
+        else:
+            self.state["briefing_day"] = today
+            self.state["news_runs"] = 1
+        self.state["news_last"] = time.time()
         save_state(self.state)
-        head = self.briefing_head()
-        self.cc_show(head + "\n\n_🛰 Fetching today's AI & tech news…_", [],
-                     shake=False, auto_hide=None, tag="Briefing")
+        head = "" if update else self.briefing_head()
+        count = NEWS_UPDATE_COUNT if update else 5
+        if not update:
+            self.cc_show(head + "\n\n_🛰 Fetching today's AI & tech news…_", [],
+                         shake=False, auto_hide=None, tag="Briefing")
 
         def work() -> None:
             # Real feeds, read by the pet; the model only picks and explains
             # items by number, so links and dates can't be made up.
-            items = news.collect()
+            # Stories shown in recent briefings are skipped, so a re-dated
+            # old article can't come back as today's news.
+            items = news.collect(seen=self.state.get("news_seen") or {})
+            if update:
+                items = [i for i in items if i["date"].timestamp() >= after]
+                if not items:  # nothing new since the last one: stay quiet
+                    self.post(lambda: setattr(self, "briefing", False))
+                    return
             if not items:
                 self.post(lambda: self.brief_done(
                     head, None, "no news feed could be reached"))
                 return
-            data, error = self.run_model(news.pick_prompt(items, since), "", None,
-                                         live=False)
-            text = news.render(data["result"], items) if data else ""
+            count_now = min(count, len(items))
+            shown: list[dict] = []
+            text = ""
+            for attempt in range(2):  # one retry: a single failed call shouldn't
+                if attempt:           # leave the day with the plain fallback
+                    time.sleep(20)
+                data, error = self.run_model(news.pick_prompt(items, since, count_now),
+                                             "", None, live=False)
+                text = news.render(data["result"], items, shown) if data else ""
+                if text:
+                    break
             if data and text:
                 data["result"] = text
-            else:  # the model failed: plain headlines, still with real links
-                data, error = {"result": news.fallback(items), "session_id": None}, None
-            self.post(lambda: self.brief_done(head, data, error))
+            else:  # the model failed: ranked headlines, still with real links
+                note = "\n_(AI picks unavailable, so these are the top headlines.)_"
+                data = {"result": news.fallback(items, since, count_now, shown) + note,
+                        "session_id": None}
+                error = None
+            seen = news.remember(self.state.get("news_seen") or {}, shown, today)
+            self.post(lambda: (self.state.update(news_seen=seen), save_state(self.state)))
+            self.post(lambda: self.brief_done(head, data, error, update))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -3829,9 +3870,10 @@ class ClaudePet:
         word = "task" if len(pending) == 1 else "tasks"
         return f"☀️ **{hello}!** {len(pending)} open {word}:\n" + "\n".join(lines) + more
 
-    def brief_done(self, head: str, data: dict | None, error: str | None) -> None:
+    def brief_done(self, head: str, data: dict | None, error: str | None,
+                   update: bool = False) -> None:
         if self.busy:  # don't cover an answer you're waiting for
-            self.root.after(2000, lambda: self.brief_done(head, data, error))
+            self.root.after(2000, lambda: self.brief_done(head, data, error, update))
             return
         self.briefing = False
         if data:
@@ -3839,14 +3881,20 @@ class ClaudePet:
             news = data["result"].strip()
         else:
             news = f"_Couldn't fetch the news: {error}_"
-        md = f"{head}\n\n**🛰 AI & tech news**\n{news}"
-        self.append("claude", md + "\n", who="Morning briefing ☀️")
-        actions = [("Ask more", self.brief_followup), ("Open tasks", self.toggle_tasks)]
+        if update:
+            md = f"**🛰 AI & tech news update**\n{news}"
+            self.append("claude", md + "\n", who="News update 🛰")
+            actions = [("Ask more", self.brief_followup)]
+        else:
+            md = f"{head}\n\n**🛰 AI & tech news**\n{news}"
+            self.append("claude", md + "\n", who="Morning briefing ☀️")
+            actions = [("Ask more", self.brief_followup), ("Open tasks", self.toggle_tasks)]
         if not data:
             actions = [("Retry", lambda: self.start_briefing())]
         self.cc_show(md, actions, shake=False, auto_hide=None, tag="Briefing")
         if self.speak_var.get():
-            self.speak(head.split("\n", 1)[0].replace("*", ""))
+            self.speak("News update." if update
+                       else head.split("\n", 1)[0].replace("*", ""))
 
     def brief_followup(self) -> None:
         """Continue in the briefing's chat so "tell me more about #2" works."""
