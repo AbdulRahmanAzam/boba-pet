@@ -131,7 +131,8 @@ try:
 except ImportError:  # numpy missing: no wake word
     wake = None
 
-MODEL = "haiku"
+MODEL = "haiku"  # default chat model, and the one for cheap background calls
+CLAUDE_MODELS = ("haiku", "sonnet", "opus")  # Claude Code aliases: newest of each
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EFFORT = "low"
 
@@ -490,6 +491,9 @@ class ClaudePet:
         self.compacting = False
         self.pending_prompt = ""  # the request running now, kept on success
         self.effort: str = self.state.get("effort", DEFAULT_EFFORT)
+        self.claude_model: str = self.state.get("claude_model", MODEL)
+        if self.claude_model not in CLAUDE_MODELS:
+            self.claude_model = MODEL
         self.claude = find_claude()
         self.provider: str = self.state.get("provider", "claude")
         if self.provider == "gemini-cli":  # Gemini CLI was replaced by Antigravity
@@ -807,6 +811,8 @@ class ClaudePet:
         self.menu.add_command(label="Copy last reply", command=self.copy_reply)
         self.menu.add_separator()
         self.menu.add_cascade(label="Effort", menu=self.effort_menu())
+        self.model_menu = tk.Menu(self.menu, tearoff=0, postcommand=self.fill_model_menu)
+        self.menu.add_cascade(label="Model", menu=self.model_menu)
         characters = tk.Menu(self.menu, tearoff=0)
         for name in CHARACTERS:
             characters.add_radiobutton(label=name, value=name,
@@ -910,8 +916,7 @@ class ClaudePet:
             for name in providers.GROQ_MODELS:
                 m.add_radiobutton(label=f"Model: {name.split('/')[-1]}", value=name,
                                   variable=self.groq_model_var,
-                                  command=lambda: self.save_flag("groq_model",
-                                                                 self.groq_model_var))
+                                  command=lambda v=name: self.set_model(v))
         if self.provider in providers.KEY_NAMES:
             m.add_command(label="Set API key…", command=self.ask_key)
             m.add_command(label="Get a key (opens browser)", command=self.open_key_page)
@@ -1040,6 +1045,7 @@ class ClaudePet:
         self.account = None
         self.link_polling = False
         self.placeholder.configure(text=f"Ask {self.provider_name()}…")
+        self.model_btn.configure(text=self.model_label())
         self.status(f"Now using {providers.PROVIDERS[key]}.", "info")
         self.check_link()
 
@@ -1131,6 +1137,51 @@ class ClaudePet:
         self.state["effort"] = self.effort
         save_state(self.state)
         self.effort_btn.configure(text=self.effort)
+
+    # ---------- model picker (like effort) ----------
+    def model_choices(self) -> list[tuple[str, str]]:
+        """(value, label) models the current provider can switch between.
+        Codex, Antigravity and the Gemini API pick theirs automatically."""
+        if self.provider == "claude":
+            return [(m, m.capitalize()) for m in CLAUDE_MODELS]
+        if self.provider == "groq":
+            return [(m, m.split("/")[-1]) for m in providers.GROQ_MODELS]
+        return [("auto", "auto")]
+
+    def current_model(self) -> str:
+        if self.provider == "claude":
+            return self.claude_model
+        if self.provider == "groq":
+            return self.groq_model_var.get()
+        return "auto"
+
+    def model_label(self) -> str:
+        return dict(self.model_choices()).get(self.current_model(), self.current_model())
+
+    def set_model(self, value: str) -> None:
+        if self.provider == "claude" and value in CLAUDE_MODELS:
+            self.claude_model = value
+            self.state["claude_model"] = value
+            save_state(self.state)
+        elif self.provider == "groq" and value in providers.GROQ_MODELS:
+            self.groq_model_var.set(value)
+            self.save_flag("groq_model", self.groq_model_var)
+        self.model_btn.configure(text=self.model_label())
+
+    def fill_model_menu(self) -> None:
+        """Right-click > Model, rebuilt for the current provider."""
+        m = self.model_menu
+        m.delete(0, "end")
+        current = self.current_model()
+        for value, label in self.model_choices():
+            m.add_command(label=("✓ " if value == current else "    ") + label,
+                          command=lambda v=value: self.set_model(v))
+
+    def open_model_drop(self, anchor: tk.Widget) -> None:
+        current = self.current_model()
+        self.open_drop(anchor, [("", label, "✓" if value == current else "",
+                                 lambda v=value: self.set_model(v))
+                                for value, label in self.model_choices()])
 
     def on_character(self) -> None:
         self.state["character"] = self.character_var.get()
@@ -1739,6 +1790,12 @@ class ClaudePet:
         self.effort_btn.pack(side="right", anchor="n", padx=4, pady=9)
         self.effort_btn.bind("<Button-1>", lambda _e: self.open_effort_drop(
             self.effort_btn))
+        self.model_btn = tk.Label(inner, text=self.model_label(), bg=INPUT_BG, fg=MUTED,
+                                  font=self.font_small, cursor="hand2",
+                                  padx=6, pady=1)
+        self.model_btn.pack(side="right", anchor="n", padx=(4, 0), pady=9)
+        self.model_btn.bind("<Button-1>", lambda _e: self.open_model_drop(
+            self.model_btn))
 
         holder = tk.Frame(inner, bg=PANEL_BG)
         holder.pack(side="left", fill="x", expand=True, pady=8)
@@ -1893,6 +1950,8 @@ class ClaudePet:
             ("🕘", "Chat history", "", self.toggle_history),
             ("📋", "Copy last reply", "", self.copy_reply),
             None,
+            ("✨", "Model", f"{self.model_label()}  ›",
+             lambda: self.open_model_drop(self.logo_btn)),
             ("🧠", "Effort", f"{self.effort}  ›",
              lambda: self.open_effort_drop(self.logo_btn)),
             ("🤖", "AI", f"{self.provider_name()}  ›", self.show_provider_picker),
@@ -4783,7 +4842,7 @@ class ClaudePet:
                          daemon=True).start()
 
     def claude_cmd(self, tools: bool | str, session: str | None) -> list[str]:
-        cmd = [self.claude, "-p", "--model", MODEL, "--effort", self.effort,
+        cmd = [self.claude, "-p", "--model", self.claude_model, "--effort", self.effort,
                "--output-format", "stream-json", "--verbose",
                "--include-partial-messages", "--settings", PET_SETTINGS,
                "--disable-slash-commands", "--autocompact", AUTOCOMPACT_TOKENS]

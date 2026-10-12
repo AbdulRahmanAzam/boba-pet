@@ -66,7 +66,9 @@ Your settings and models stay in `%USERPROFILE%\.boba-pet` and
   (↑ input, ↓ output) and has a cheap **Compact** button that rolls the chat
   into a short note.
 - **Quick menu**: click the ✱ in the ask box for ask, talk, screenshot, new
-  chat, compact, history, effort level and more.
+  chat, compact, history, model, effort level and more.
+- **Model and effort** next to the ask box: click to switch, e.g. Haiku, Sonnet
+  or Opus on Claude Code (Haiku is the default and the cheapest).
 - **Voice, fully offline**: talk with the mic button (Whisper), say
   "Hey Boba" to wake it (Vosk), and have replies read aloud (Windows TTS).
 - **Claude Code companion**: it looks busy while a session works, celebrates
